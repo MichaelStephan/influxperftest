@@ -1,22 +1,26 @@
 (ns influxtest.core
   (:require [org.httpkit.client :as http]
-            [clojure.core.async :refer [chan put! close!]]
+            [clojure.core.async :refer [chan put! close! go go-loop >! <! <!!]]
             [clojure.string :refer [join]]
-            [taoensso.timbre :refer [infof warnf]])
+            [taoensso.timbre :refer [infof warnf]]
+            [influxtest.influxdb :refer [write-measurements]])
   (:use [slingshot.slingshot :only [throw+]])
   (:gen-class))
-
-(def influx-endoint "http://localhost:8086")
-(def influx-query-endpoint (str influx-endoint "/query"))
-(def influx-write-endpoint (str influx-endoint "/write"))
 
 (defn rand-chars [cnt]
   (take cnt (repeatedly (fn [] (rand-nth "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")))))
 
-(def rand-value (partial rand 100))
+(defn rand-value []
+  (.nextDouble (java.util.concurrent.ThreadLocalRandom/current)))
 
 (defn rand-name [cnt]
-  (clojure.string/join "" (rand-chars cnt)))
+  (join "" (rand-chars cnt)))
+
+(defn measurement-template-configs []
+  (repeatedly (fn []
+                (if (< (rand-int 101) 25)
+                  [[5 25] 1]
+                  [[5] 0]))))
 
 (defn measurement-templates [mms [[fields values] & rest]]
   (let [mm {(keyword (rand-name 20)) {:tags (or
@@ -32,70 +36,94 @@
       (recur mms rest)
       (into [] mms))))
 
-(defn rand-measurement-template [measurement-templates]
-  (repeatedly (fn []
-                (rand-nth measurement-templates))))
+(defn measurement-template->measurement [[measurement {:keys [tags values]}]]
+  [measurement {:tags (apply merge (map (fn [[tag-name tag-values]]
+                                          {tag-name (rand-nth tag-values)}) (into [] tags)))
+                :values (apply merge (map (fn [[value-name value]]
+                                            {value-name  (value)}) (into [] values)))}])
 
-(defn measurement->line-protocol [[measurement {:keys [tags values]}]]
+(defn measurement->line-protocol-measurement [[measurement {:keys [tags values]}]]
   (str (name measurement)
        (if (empty? tags) " " ",")
-       (clojure.string/join "," (map (fn [[tag-name tag-values]]
-                                       (str (name tag-name) "=" (rand-nth tag-values))) (into [] tags)))
+       (join "," (map (fn [[tag-name tag-value]]
+                                       (str (name tag-name) "=" tag-value)) (into [] tags)))
        " "
-       (clojure.string/join "," (map (fn [[value-name value]]
-                                       (str (name value-name) "=" (value))) (into [] values)))))
+       (join "," (map (fn [[value-name value]]
+                                       (str (name value-name) "=" value)) (into [] values)))))
 
-(defn create-database [database]
-  (let [{:keys [status error]} @(http/get influx-query-endpoint
-                                          {:query-params {:q (str "create database " database)}})]
-    (when (or error (not= status 200))
-      (infof "Failed to create database %s - status: %s/ error: %s" database status error)
-      (throw+ :create-database-error))))
+(defn line-protocol-measurements [templates]
+  (repeatedly (fn []
+                (->> templates
+                     (rand-nth)
+                     (measurement-template->measurement)
+                     (measurement->line-protocol-measurement)))))
 
-(defn drop-database [database]
-  (let [{:keys [status error]} @(http/get influx-query-endpoint
-                                          {:query-params {:q (str "drop database " database)}})]
-    (when (or error (not= status 200))
-      (warnf "Failed to drop database %s - status: %s/ error: %s" database status error))))
-
-(defn initialize-influx [{:keys [database]}]
-  (create-database database))
-
-(defn destroy-influx [{:keys [database]}]
-  (drop-database database))
-
-(defn write-measurements [database measurements] 
-  (Thread/sleep 100)
-  (let [ret (chan)
-        start-time (System/nanoTime)
-        measurements (clojure.string/join "\n" measurements)]
-    (http/post influx-write-endpoint {:headers {"content-type" "application/x-www-form-urlencoded"}
-                                      :query-params {:db database}
-                                      :body measurements}
-               (fn [{:keys [status error]}]
-                 (let [end-time (System/nanoTime)
-                       duration (- end-time start-time)]
-                   (when (or error (not= status 204))
-                     (warnf "Failed to write measurement '%s' to database %s - status: %s/ error: %s" measurements database status error))
-                   (close! ret))))
-    ret))
-
-(def templates-config [[[3 3] 2]
-                       [[] 1]
-                       [[3 1] 5]])
-
+; 60 teams
+; a 10 apps/ team
+; a 20 metrics/ app
+(def templates-config (take (reduce * [60 10 20]) (measurement-template-configs)))
 (def templates (measurement-templates  {} templates-config))
 
-; (inc (rand-int 100))
+(defn rand-line-protocol-measurements-ch 
+  ([templates]
+   (rand-line-protocol-measurements-ch -1 templates))
+  ([n templates]
+    (let [ret-ch (chan)]
+      (go-loop [n n]
+               (if (or (> n 0)
+                       (= n -1))
+                 (do
+                   (->> templates
+                        (line-protocol-measurements)
+                        (take 1000)
+                        (>! ret-ch))
+                   (recur (dec n)))
+                 (close! ret-ch)))
+      ret-ch)))
 
-(defn -main [& args]
-  (dotimes [n 100]
-    #_(Thread/sleep 300)
-    (->> templates
-           rand-measurement-template
-           (take 1)
-           (map measurement->line-protocol)
-           (write-measurements "testX"))))
-  
+(defn nano->msec [v]
+  (/ v 1000000.0))
 
+(defn test-write-measurements []
+  (let [measurements-ch (rand-line-protocol-measurements-ch 1000 templates)
+        ret-ch (write-measurements measurements-ch "testX")
+        start (System/nanoTime)]
+    (go-loop [req-total 0
+              req-ok 0 req-ko 0
+              req-ok-resp-time 0 req-ok-resp-time-min (Long/MAX_VALUE) req-ok-resp-time-max 0]
+             (if-let [ret (<! ret-ch)]
+               (let [{:keys [count duration status error]} ret
+                     success? (and (not error) (< status 400))]
+                 (if success?
+                   (recur (+ req-total count)
+                          (+ req-ok count)
+                          req-ko
+                          (+ req-ok-resp-time duration)
+                          (if (< duration req-ok-resp-time-min) duration req-ok-resp-time-min)
+                          (if (> duration req-ok-resp-time-max) duration req-ok-resp-time-max))
+                   (recur (+ req-total count)
+                          req-ok
+                          (+ req-ko count)
+                          req-ok-resp-time
+                          req-ok-resp-time-min
+                          req-ok-resp-time-max)))
+               (let [duration (nano->sec (- (System/nanoTime) start))]
+                 {:duration duration 
+                  :req-msec (/ req-total duration) 
+                  :req {:count req-total
+                        :ok {:count req-ok
+                             :avg (/ req-ok-resp-time req-ok)
+                             :min (nano->sec req-ok-resp-time-min)
+                             :max (nano->sec req-ok-resp-time-max)}
+                        :ko req-ko}})))))
+
+(defn test []
+  (go
+    (let [x1 (test-write-measurements)
+          x2 (test-write-measurements)
+          x3 (test-write-measurements)]
+      [(<! x1) (<! x2) (<! x3)])))
+
+
+(defn -main [& args]) 
 
