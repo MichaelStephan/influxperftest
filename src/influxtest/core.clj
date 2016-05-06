@@ -6,7 +6,8 @@
             [influxtest.influxdb :as db :refer [write-measurements initialize-influx destroy-influx]]
             [metrics.core :refer [new-registry]]
             [metrics.histograms :refer [defhistogram histogram update! percentiles smallest largest std-dev mean]]
-            [clojure.walk :refer [keywordize-keys]])
+            [clojure.walk :refer [keywordize-keys]]
+            [clojure.pprint :refer [pprint]])
   (:use [slingshot.slingshot :only [throw+]])
   (:gen-class))
 
