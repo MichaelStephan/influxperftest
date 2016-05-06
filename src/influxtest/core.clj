@@ -3,9 +3,13 @@
             [clojure.core.async :refer [chan put! close! go go-loop >! <! <!!]]
             [clojure.string :refer [join]]
             [taoensso.timbre :refer [infof warnf]]
-            [influxtest.influxdb :refer [write-measurements]])
+            [influxtest.influxdb :refer [write-measurements]]
+            [metrics.core :refer [new-registry]]
+            [metrics.histograms :refer [defhistogram histogram update! percentiles smallest largest std-dev mean]])
   (:use [slingshot.slingshot :only [throw+]])
   (:gen-class))
+
+(def reg (new-registry))
 
 (defn rand-chars [cnt]
   (take cnt (repeatedly (fn [] (rand-nth "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")))))
@@ -85,44 +89,43 @@
   (/ v 1000000.0))
 
 (defn test-write-measurements []
-  (let [measurements-ch (rand-line-protocol-measurements-ch 1000 templates)
+  (let [measurements-ch (rand-line-protocol-measurements-ch 100 templates)
         ret-ch (write-measurements measurements-ch "testX")
-        start (System/nanoTime)]
+        start (System/nanoTime)
+        req-ok-resp-time-histo-name (name (gensym "req-ok-resp-time-histo"))]
     (go-loop [req-total 0
               req-ok 0 req-ko 0
-              req-ok-resp-time 0 req-ok-resp-time-min (Long/MAX_VALUE) req-ok-resp-time-max 0]
+              req-ok-resp-time-histo (histogram reg req-ok-resp-time-histo-name)]
              (if-let [ret (<! ret-ch)]
                (let [{:keys [count duration status error]} ret
                      success? (and (not error) (< status 400))]
                  (if success?
-                   (recur (+ req-total count)
-                          (+ req-ok count)
-                          req-ko
-                          (+ req-ok-resp-time duration)
-                          (if (< duration req-ok-resp-time-min) duration req-ok-resp-time-min)
-                          (if (> duration req-ok-resp-time-max) duration req-ok-resp-time-max))
+                   (do
+                     (update! req-ok-resp-time-histo (nano->msec duration))
+                     (recur (+ req-total count)
+                            (+ req-ok count)
+                            req-ko
+                            req-ok-resp-time-histo))
                    (recur (+ req-total count)
                           req-ok
                           (+ req-ko count)
-                          req-ok-resp-time
-                          req-ok-resp-time-min
-                          req-ok-resp-time-max)))
-               (let [duration (nano->sec (- (System/nanoTime) start))]
+                          req-ok-resp-time-histo)))
+               (let [duration (nano->msec (- (System/nanoTime) start))]
                  {:duration duration 
-                  :req-msec (/ req-total duration) 
+                  :req-msec (/ req-total duration)
                   :req {:count req-total
                         :ok {:count req-ok
-                             :avg (/ req-ok-resp-time req-ok)
-                             :min (nano->sec req-ok-resp-time-min)
-                             :max (nano->sec req-ok-resp-time-max)}
+                             :min (smallest req-ok-resp-time-histo) 
+                             :max (largest req-ok-resp-time-histo) 
+                             :mean (mean req-ok-resp-time-histo)
+                             :std-dev (std-dev req-ok-resp-time-histo) 
+                             :percentiles (percentiles req-ok-resp-time-histo [0.25 0.50 0.75 0.95 0.99 0.999])}
                         :ko req-ko}})))))
 
 (defn test []
   (go
-    (let [x1 (test-write-measurements)
-          x2 (test-write-measurements)
-          x3 (test-write-measurements)]
-      [(<! x1) (<! x2) (<! x3)])))
+    (let [x1 (test-write-measurements)]
+      [(<! x1)])))
 
 
 (defn -main [& args]) 

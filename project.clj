@@ -7,7 +7,8 @@
                  [http-kit "2.1.18"]
                  [org.clojure/core.async "0.2.374"]
                  [slingshot "0.12.2"]
-                 [com.taoensso/timbre "4.3.1"]]
+                 [com.taoensso/timbre "4.3.1"]
+                 [metrics-clojure "2.6.1"]]
   :main ^:skip-aot influxtest.core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}})
