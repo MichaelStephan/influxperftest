@@ -1,11 +1,12 @@
 (ns influxtest.core
   (:require [org.httpkit.client :as http]
-            [clojure.core.async :refer [chan put! close! go go-loop >! <! <!!]]
+            [clojure.core.async :as a :refer [chan put! close! go go-loop >! <! <!! pipeline-async onto-chan]]
             [clojure.string :refer [join]]
             [taoensso.timbre :refer [infof warnf]]
-            [influxtest.influxdb :refer [write-measurements]]
+            [influxtest.influxdb :as db :refer [write-measurements initialize-influx destroy-influx]]
             [metrics.core :refer [new-registry]]
-            [metrics.histograms :refer [defhistogram histogram update! percentiles smallest largest std-dev mean]])
+            [metrics.histograms :refer [defhistogram histogram update! percentiles smallest largest std-dev mean]]
+            [clojure.walk :refer [keywordize-keys]])
   (:use [slingshot.slingshot :only [throw+]])
   (:gen-class))
 
@@ -69,17 +70,17 @@
 (def templates (measurement-templates  {} templates-config))
 
 (defn rand-line-protocol-measurements-ch 
-  ([templates]
-   (rand-line-protocol-measurements-ch -1 templates))
-  ([n templates]
+  ([templates batch-size]
+   (rand-line-protocol-measurements-ch -1 templates batch-size))
+  ([n templates batch-size]
     (let [ret-ch (chan)]
       (go-loop [n n]
-               (if (or (> n 0)
+               (if (or (>= n 0)
                        (= n -1))
                  (do
                    (->> templates
                         (line-protocol-measurements)
-                        (take 1000)
+                        (take batch-size)
                         (>! ret-ch))
                    (recur (dec n)))
                  (close! ret-ch)))
@@ -88,9 +89,9 @@
 (defn nano->msec [v]
   (/ v 1000000.0))
 
-(defn test-write-measurements []
-  (let [measurements-ch (rand-line-protocol-measurements-ch 100 templates)
-        ret-ch (write-measurements measurements-ch "testX")
+(defn test-write-measurements [database n-times batch-size]
+  (let [measurements-ch (rand-line-protocol-measurements-ch n-times templates batch-size)
+        ret-ch (write-measurements measurements-ch database)
         start (System/nanoTime)
         req-ok-resp-time-histo-name (name (gensym "req-ok-resp-time-histo"))]
     (go-loop [req-total 0
@@ -111,22 +112,51 @@
                           (+ req-ko count)
                           req-ok-resp-time-histo)))
                (let [duration (nano->msec (- (System/nanoTime) start))]
-                 {:duration duration 
+                 {:start start
+                  :duration duration 
+                  :batch-size batch-size
                   :req-msec (/ req-total duration)
                   :req {:count req-total
                         :ok {:count req-ok
-                             :min (smallest req-ok-resp-time-histo) 
-                             :max (largest req-ok-resp-time-histo) 
-                             :mean (mean req-ok-resp-time-histo)
-                             :std-dev (std-dev req-ok-resp-time-histo) 
-                             :percentiles (percentiles req-ok-resp-time-histo [0.25 0.50 0.75 0.95 0.99 0.999])}
-                        :ko req-ko}})))))
+                              :min (smallest req-ok-resp-time-histo) 
+                              :max (largest req-ok-resp-time-histo) 
+                              :mean (mean req-ok-resp-time-histo)
+                              :std-dev (std-dev req-ok-resp-time-histo) 
+                              :percentiles (percentiles req-ok-resp-time-histo [0.25 0.50 0.75 0.95 0.99 0.999])}
+                        :ko {:count req-ko}}})))))
 
-(defn test []
-  (go
-    (let [x1 (test-write-measurements)]
-      [(<! x1)])))
+(defn -main [& args]
+  (let [{:keys [--database --database-endpoint --n-writers --n-times --batch-size] :or {--database-endpoint "http://localhost:8086"
+                                                                                        --n-writers 1
+                                                                                        --n-times 1000
+                                                                                        --batch-size 1000}}
+        (-> (apply hash-map args) keywordize-keys)]
+    (assert (> --n-times 0))
+    (assert (> --n-writers 0))
+    (assert (> --batch-size 0))
+    (assert (not (empty? --database)))
+    (assert (not (empty? --database-endpoint)))
+    
+    (reset! db/influx-endoint --database-endpoint) 
+    (destroy-influx {:database --database})
+    (initialize-influx {:database --database})
+    (let [in-ch (chan)
+          ret-ch (chan)]
+      (pipeline-async --n-writers ret-ch (fn [i ret-ch]
+                                           (go
+                                             (->> (test-write-measurements --database --n-times --batch-size) (<!) (>! ret-ch))
+                                             (close! ret-ch))) in-ch)
+      (onto-chan in-ch (range --n-writers))
+      (loop [min-start (Long/MAX_VALUE) ok-count 0 ko-count 0]
+        (if-let [ret (<!! ret-ch)]
+          (let [{:keys [start]} ret]
+            (pprint ret)
+            (recur (if (< start min-start) start min-start)
+                   (+ (get-in ret [:req :ok :count]) ok-count)
+                   (+ (get-in ret [:req :ko :count]) ko-count)))
+          (println {:req-msec (/ ok-count
+                                 (nano->msec (- (System/nanoTime) min-start)))}))))
+    (destroy-influx {:database --database})))
 
 
-(defn -main [& args]) 
 

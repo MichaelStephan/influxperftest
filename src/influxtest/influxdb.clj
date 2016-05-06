@@ -5,19 +5,19 @@
             [taoensso.timbre :refer [infof warnf]])
   (:use [slingshot.slingshot :only [throw+]]))
 
-(def influx-endoint "http://localhost:8086")
-(def influx-query-endpoint (str influx-endoint "/query"))
-(def influx-write-endpoint (str influx-endoint "/write"))
+(def influx-endoint (atom "http://localhost:8086"))
+(def influx-query-endpoint (atom (str @influx-endoint "/query")))
+(def influx-write-endpoint (atom (str @influx-endoint "/write")))
 
 (defn create-database [database]
-  (let [{:keys [status error]} @(http/get influx-query-endpoint
+  (let [{:keys [status error]} @(http/get @influx-query-endpoint
                                           {:query-params {:q (str "create database " database)}})]
     (when (or error (not= status 200))
       (infof "Failed to create database %s - status: %s/ error: %s" database status error)
       (throw+ :create-database-error))))
 
 (defn drop-database [database]
-  (let [{:keys [status error]} @(http/get influx-query-endpoint
+  (let [{:keys [status error]} @(http/get @influx-query-endpoint
                                           {:query-params {:q (str "drop database " database)}})]
     (when (or error (not= status 200))
       (warnf "Failed to drop database %s - status: %s/ error: %s" database status error))))
@@ -34,7 +34,7 @@
              (if-let [line-protocol-measurements (<! line-protocol-measurements-ch)]
                (let [start-time (System/nanoTime)
                      measurements (join "\n" line-protocol-measurements)]
-                 (http/post influx-write-endpoint {:headers {"content-type" "application/x-www-form-urlencoded"}
+                 (http/post @influx-write-endpoint {:headers {"content-type" "application/x-www-form-urlencoded"}
                                                    :query-params {:db database}
                                                    :body measurements}
                             (fn [{:keys [status error]}]
