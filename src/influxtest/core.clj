@@ -133,11 +133,14 @@
                                                                                         --batch-size 1000}}
         (-> (apply hash-map args) keywordize-keys)]
     (assert (> --n-times 0))
-    (assert (> --n-writers 0))
+    (assert (and (> --n-writers 0) (<= --n-writers (.availableProcessors (Runtime/getRuntime)))))
     (assert (> --batch-size 0))
     (assert (not (empty? --database)))
     (assert (not (empty? --database-endpoint)))
-    
+   
+
+
+
     (reset! db/influx-endoint --database-endpoint) 
     (destroy-influx {:database --database})
     (initialize-influx {:database --database})
