@@ -131,15 +131,15 @@
                                                                                         --n-writers 1
                                                                                         --n-times 1000
                                                                                         --batch-size 1000}}
-        (-> (apply hash-map args) keywordize-keys)]
+        (-> (apply hash-map args) keywordize-keys)
+        --n-times (if (string? --n-times) (read-string --n-times) --n-times)
+        --n-writers (if (string? --n-writers) (read-string --n-writers) --n-writers)
+        --batch-size (if (string? --batch-size) (read-string --batch-size) --batch-size)] 
     (assert (> --n-times 0))
-    (assert (and (> --n-writers 0) (<= --n-writers (.availableProcessors (Runtime/getRuntime)))))
+    (assert (and (> --n-writers 0) (<= --n-writers (* 2 (.availableProcessors (Runtime/getRuntime))))))
     (assert (> --batch-size 0))
     (assert (not (empty? --database)))
     (assert (not (empty? --database-endpoint)))
-   
-
-
 
     (reset! db/influx-endoint --database-endpoint) 
     (destroy-influx {:database --database})
