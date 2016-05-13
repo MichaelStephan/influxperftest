@@ -142,7 +142,7 @@
     (assert (not (empty? --database-endpoint)))
 
     (reset! db/influx-endoint --database-endpoint) 
-    (destroy-influx {:database --database})
+#_(destroy-influx {:database --database})
     (initialize-influx {:database --database})
     (let [in-ch (chan)
           ret-ch (chan)]
@@ -160,7 +160,7 @@
                    (+ (get-in ret [:req :ko :count]) ko-count)))
           (println {:req-msec (/ ok-count
                                  (nano->msec (- (System/nanoTime) min-start)))}))))
-    (destroy-influx {:database --database})))
+#_(destroy-influx {:database --database})))
 
 
 
