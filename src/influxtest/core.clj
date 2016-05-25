@@ -1,6 +1,6 @@
 (ns influxtest.core
   (:require [org.httpkit.client :as http]
-            [clojure.core.async :as a :refer [chan put! close! go go-loop >! <! <!! pipeline-async onto-chan]]
+            [clojure.core.async :as a :refer [chan put! close! go go-loop >! <! <!! pipeline-async onto-chan timeout]]
             [clojure.string :refer [join]]
             [taoensso.timbre :refer [infof warnf]]
             [influxtest.influxdb :as db :refer [execute-query write-measurements initialize-influx destroy-influx]]
@@ -58,12 +58,14 @@
        (join "," (map (fn [[value-name value]]
                         (str (name value-name) "=" value)) (into [] values)))))
 
+(def used-templates (atom #{}))
 (defn line-protocol-measurements [templates]
   (repeatedly (fn []
-                (->> templates
-                     (rand-nth)
-                     (measurement-template->measurement)
-                     (measurement->line-protocol-measurement)))))
+                (let [template (->> templates (rand-nth))]
+                  (swap! used-templates conj template)
+                  (->> template
+                       (measurement-template->measurement)
+                       (measurement->line-protocol-measurement))))))
 
 ; 60 teams
 ; a 10 apps/ team
@@ -73,7 +75,7 @@
 
 (defn rand-line-protocol-measurements-ch 
   ([templates batch-size continue]
-   (rand-line-protocol-measurements-ch -1 templates batch-size))
+   (rand-line-protocol-measurements-ch -1 templates batch-size continue))
   ([n-times templates batch-size continue]
    (let [ret-ch (chan)]
      (go-loop [n n-times]
@@ -143,7 +145,10 @@
                 (or (> n-times 0)
                     (<= n-times -1)))
         (do
-          (>! ret-ch (select-query (rand-nth templates)))
+          (>! ret-ch (select-query (let [template (take 1 (drop (rand-int (count @used-templates)) @used-templates))]
+                                     (if (empty? template)
+                                       (rand-nth templates)
+                                       (first template)))))
           (recur (dec i)))
         (close! ret-ch)))
     ret-ch))
@@ -161,7 +166,7 @@
     (loop [min-start (Long/MAX_VALUE) ok-count 0 ko-count 0]
       (if-let [ret (<!! ret-ch)]
         (let [{:keys [start]} ret]
-          ; (pprint ret)
+          ; (pprint (assoc ret :name name))
           (recur (if (< start min-start) start min-start)
                  (+ (get-in ret [:req :ok :count]) ok-count)
                  (+ (get-in ret [:req :ko :count]) ko-count)))
@@ -169,19 +174,24 @@
                   :req-msec (/ ok-count
                                (nano->msec (- (System/nanoTime) min-start)))})))))
 
+(defn stop! []
+  (reset! continue_ false))
+
 (defn -main [& args]
   (let [available-processors (.availableProcessors (Runtime/getRuntime))
-        {:keys [--database --database-endpoint --n-writers --n-times-read --n-times-write --batch-size --n-readers] :or {--database-endpoint "http://localhost:8086"
-                                                                                                                         --n-readers 0
-                                                                                                                         --n-writers 0 
-                                                                                                                         --n-times-read 1000
-                                                                                                                         --n-times-write 1000
+        {:keys [--database --database-endpoint --duration --n-writers --n-times-read --n-times-write --batch-size --n-readers] :or {--database-endpoint "http://localhost:8086"
+                                                                                                                         --n-readers 1 
+                                                                                                                         --n-writers 1
+                                                                                                                         --duration 10 
+                                                                                                                         --n-times-read -1 
+                                                                                                                         --n-times-write -1 
                                                                                                                          --batch-size 1000}}
         (-> (apply hash-map args) keywordize-keys)
         --n-times-read (if (string? --n-times-read) (read-string --n-times-read) --n-times-read)
         --n-times-write (if (string? --n-times-write) (read-string --n-times-write) --n-times-write)
         --n-writers (if (string? --n-writers) (read-string --n-writers) --n-writers)
-        --batch-size (if (string? --batch-size) (read-string --batch-size) --batch-size)] 
+        --batch-size (if (string? --batch-size) (read-string --batch-size) --batch-size)
+        --duration (if (string? --duration) (read-string --duration) --duration)] 
     (assert (and (>= --n-readers 0) (<= --n-readers (* 2 available-processors))))
     (assert (and (>= --n-writers 0) (<= --n-writers (* 2 available-processors))))
     (assert (> --batch-size 0))
@@ -191,6 +201,14 @@
     (reset! continue_ true)
     (reset! db/influx-endoint --database-endpoint) 
     (doto {:database --database} destroy-influx initialize-influx)
+
+    (when (not= -1 --duration) 
+      (go-loop [start (System/currentTimeMillis)]
+               (<! (timeout 1000))
+               (if (> (- (System/currentTimeMillis) start) (* 1000 --duration))
+                 (stop!)
+                 (recur start))))
+
     (let [writes (future 
                    (if (> --n-writers 0)
                      (run-parallel-test "write measurement" --n-writers #(test-write-measurements --database --n-times-write --batch-size))
@@ -200,8 +218,7 @@
                     (run-parallel-test "execute query" --n-readers #(test-read-query --database --n-times-read))
                     (println "skipping reads, readers set to zero")))]
       @writes
-      (reset! continue_ false)
+      (stop!)
       @reads)))
 
-#_(remove :error (repeatedly 100 (fn [] (<!! (influxtest.influxdb/query (test-query (rand-nth templates)) "testX")))))
 

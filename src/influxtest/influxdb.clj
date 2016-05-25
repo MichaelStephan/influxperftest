@@ -26,7 +26,7 @@
 (defn destroy-influx [{:keys [database]}]
   (drop-database database))
 
-(defn execute-query [query-ch database] ; TODO bug
+(defn execute-query [query-ch database]
   (let [ret-ch (chan)]
     (go-loop []
       (if-let [query (<! query-ch)]
@@ -46,7 +46,7 @@
         (close! ret-ch)))
     ret-ch))
 
-(defn write-measurements [line-protocol-measurements-ch database] ; TODO bug
+(defn write-measurements [line-protocol-measurements-ch database]
   (let [ret-ch (chan)]
     (go-loop []
       (if-let [line-protocol-measurements (<! line-protocol-measurements-ch)]
