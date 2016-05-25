@@ -166,7 +166,7 @@
     (loop [min-start (Long/MAX_VALUE) ok-count 0 ko-count 0]
       (if-let [ret (<!! ret-ch)]
         (let [{:keys [start]} ret]
-          ; (pprint (assoc ret :name name))
+          (pprint (assoc ret :name name))
           (recur (if (< start min-start) start min-start)
                  (+ (get-in ret [:req :ok :count]) ok-count)
                  (+ (get-in ret [:req :ko :count]) ko-count)))
