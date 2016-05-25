@@ -179,13 +179,14 @@
 
 (defn -main [& args]
   (let [available-processors (.availableProcessors (Runtime/getRuntime))
-        {:keys [--database --database-endpoint --duration --n-writers --n-times-read --n-times-write --batch-size --n-readers] :or {--database-endpoint "http://localhost:8086"
+        {:keys [--drop-database --database --database-endpoint --duration --n-writers --n-times-read --n-times-write --batch-size --n-readers] :or {--database-endpoint "http://localhost:8086"
                                                                                                                          --n-readers 1 
                                                                                                                          --n-writers 1
                                                                                                                          --duration 10 
                                                                                                                          --n-times-read -1 
                                                                                                                          --n-times-write -1 
-                                                                                                                         --batch-size 1000}}
+                                                                                                                         --batch-size 1000
+                                                                                                                                                    --drop-database false}}
         (-> (apply hash-map args) keywordize-keys)
         --n-times-read (if (string? --n-times-read) (read-string --n-times-read) --n-times-read)
         --n-times-write (if (string? --n-times-write) (read-string --n-times-write) --n-times-write)
@@ -200,7 +201,8 @@
 
     (reset! continue_ true)
     (reset! db/influx-endoint --database-endpoint) 
-    (doto {:database --database} destroy-influx initialize-influx)
+    (doto {:database --database} ; destroy-influx
+      initialize-influx)
 
     (when (not= -1 --duration) 
       (go-loop [start (System/currentTimeMillis)]
