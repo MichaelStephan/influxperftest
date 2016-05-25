@@ -190,6 +190,7 @@
         (-> (apply hash-map args) keywordize-keys)
         --n-times-read (if (string? --n-times-read) (read-string --n-times-read) --n-times-read)
         --n-times-write (if (string? --n-times-write) (read-string --n-times-write) --n-times-write)
+        --n-readers (if (string? --n-readers) (read-string --n-readers) --n-readers)
         --n-writers (if (string? --n-writers) (read-string --n-writers) --n-writers)
         --batch-size (if (string? --batch-size) (read-string --batch-size) --batch-size)
         --duration (if (string? --duration) (read-string --duration) --duration)] 
